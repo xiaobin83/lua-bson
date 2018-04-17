@@ -4,7 +4,11 @@
 #include <lauxlib.h>
 
 #include <time.h>
-#include <unistd.h>
+#ifdef _MSC_VER 
+# include "unistd_win.h"
+#else
+# include <unistd.h>
+#endif
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -61,15 +65,15 @@ static char bson_numstrs[MAX_NUMBER][4];
 static int bson_numstr_len[MAX_NUMBER];
 
 struct bson {
-	int size;
-	int cap;
+	size_t size;
+	size_t cap;
 	uint8_t *ptr;
 	uint8_t buffer[DEFAULT_CAP];
 };
 
 struct bson_reader {
 	const uint8_t * ptr;
-	int size;
+	size_t size;
 };
 
 static inline int32_t
@@ -94,7 +98,7 @@ bson_create(struct bson *b) {
 }
 
 static inline void
-bson_reserve(struct bson *b, int sz) {
+bson_reserve(struct bson *b, size_t sz) {
 	if (b->size + sz <= b->cap)
 		return;
 	do {
@@ -110,7 +114,7 @@ bson_reserve(struct bson *b, int sz) {
 }
 
 static inline void
-check_reader(lua_State *L, struct bson_reader *br, int sz) {
+check_reader(lua_State *L, struct bson_reader *br, size_t sz) {
 	if (br->size < sz) {
 		luaL_error(L, "Invalid bson block (%d:%d)", br->size, sz);
 	}
@@ -209,7 +213,7 @@ write_int32(struct bson *b, int32_t v) {
 }
 
 static inline void
-write_length(struct bson *b, int32_t v, int off) {
+write_length(struct bson *b, size_t v, long off) {
 	uint32_t uv = (uint32_t)v;
 	b->ptr[off++] = uv & 0xff;
 	b->ptr[off++] = (uv >> 8)&0xff;
@@ -225,9 +229,9 @@ write_string(struct bson *b, const char *key, size_t sz) {
 	b->size+=sz+1;
 }
 
-static inline int
+static inline size_t
 reserve_length(struct bson *b) {
-	int sz = b->size;
+	size_t sz = b->size;
 	bson_reserve(b,4);
 	b->size +=4;
 	return sz;
@@ -268,17 +272,17 @@ append_key(struct bson *bs, int type, const char *key, size_t sz) {
 #if LUA_VERSION_NUM >= 503
 
 static inline int
-is_32bit(int64_t v) {
+is_32bit(lua_Integer v) {
 	return v >= INT32_MIN && v <= INT32_MAX;
 }
 
 static void
 append_number(struct bson *bs, lua_State *L, const char *key, size_t sz) {
 	if (lua_isinteger(L, -1)) {
-		int64_t i = lua_tointeger(L, -1);
+		lua_Integer i = lua_tointeger(L, -1);
 		if (is_32bit(i)) {
 			append_key(bs, BSON_INT32, key, sz);
-			write_int32(bs, i);
+			write_int32(bs, (int32_t)i);
 		} else {
 			append_key(bs, BSON_INT64, key, sz);
 			write_int64(bs, i);
@@ -333,11 +337,11 @@ append_table(struct bson *bs, lua_State *L, const char *key, size_t sz, int dept
 
 static void
 write_binary(struct bson *b, const void * buffer, size_t sz) {
-	int length = reserve_length(b);
+	size_t length = reserve_length(b);
 	bson_reserve(b,sz);
 	memcpy(b->ptr + b->size, buffer, sz);	// include sub type
 	b->size+=sz;
-	write_length(b, sz-1, length);	// not include sub type
+	write_length(b, sz-1, (long)length);	// not include sub type
 }
 
 static void
@@ -422,9 +426,9 @@ append_one(struct bson *bs, lua_State *L, const char *key, size_t sz, int depth)
 			size_t len;
 			const char * str = lua_tolstring(L,-1,&len);
 			append_key(bs, BSON_STRING, key, sz);
-			int off = reserve_length(bs);
+			size_t off = reserve_length(bs);
 			write_string(bs, str, len);
-			write_length(bs, len+1, off);		
+			write_length(bs, len+1, (long)off);		
 		}
 		break;
 	}
@@ -493,14 +497,14 @@ pack_simple_dict(lua_State *L, struct bson *b, bool isarray, int depth) {
 		luaL_error(L, "Too depth while encoding bson");
 	}
 	luaL_checkstack(L, 16, NULL);	// reserve enough stack space to pack table
-	int length = reserve_length(b);
+	size_t length = reserve_length(b);
 	lua_pushnil(L);
 	while(lua_next(L,-2) != 0) {
 		int kt = lua_type(L, -2);
 		pack_dict_data(L, b, isarray, depth, kt);
 	}
 	write_byte(b,0);
-	write_length(b, b->size - length, length);
+	write_length(b, b->size - length, (long)length);
 }
 
 
@@ -510,7 +514,7 @@ pack_meta_dict(lua_State *L, struct bson *b, bool isarray, int depth) {
 		luaL_error(L, "Too depth while encoding bson");
 	}
 	luaL_checkstack(L, 16, NULL);	// reserve enough stack space to pack table
-	int length = reserve_length(b);
+	size_t length = reserve_length(b);
 
 	lua_pushvalue(L, -2); // push meta_obj
 	lua_call(L, 1, 3); // call __pairs_func => next_func, t_data, first_k
@@ -528,7 +532,7 @@ pack_meta_dict(lua_State *L, struct bson *b, bool isarray, int depth) {
 		pack_dict_data(L, b, isarray, depth, kt);
 	}
 	write_byte(b,0);
-	write_length(b, b->size - length, length);
+	write_length(b, b->size - length, (long)length);
 }
 
 static void
@@ -542,7 +546,7 @@ pack_dict(lua_State *L, struct bson *b, bool isarray, int depth) {
 
 static void
 pack_ordered_dict(lua_State *L, struct bson *b, int n, int depth) {
-	int length = reserve_length(b);
+	size_t length = reserve_length(b);
 	int i;
 	for (i=0;i<n;i+=2) {
 		size_t sz;
@@ -555,7 +559,7 @@ pack_ordered_dict(lua_State *L, struct bson *b, int n, int depth) {
 		lua_pop(L,1);
 	}
 	write_byte(b,0);
-	write_length(b, b->size - length, length);
+	write_length(b, b->size - length, (long)length);
 }
  
 static int
@@ -647,7 +651,7 @@ unpack_dict(lua_State *L, struct bson_reader *br, bool array) {
 			break;
 		case BSON_DATE: {
 			int64_t date = read_int64(L, &t);
-			uint32_t v = date / 1000;
+			uint32_t v = (uint32_t)(date / 1000);
 			make_object(L, BSON_DATE, &v, 4);
 			break;
 		}
@@ -857,7 +861,7 @@ lreplace(lua_State *L) {
 	if (!lua_isnumber(L,-1)) {
 		return luaL_error(L, "Can't replace key : %s", lua_tostring(L,2));
 	}
-	int id = lua_tointeger(L, -1);
+	int id = (int)lua_tointeger(L, -1);
 	int type = id & ((1<<(BSON_TYPE_SHIFT)) - 1);
 	int offset = id >> BSON_TYPE_SHIFT;
 	uint8_t * start = lua_touserdata(L,1);
@@ -879,7 +883,7 @@ lreplace(lua_State *L) {
 		if (!lua_isinteger(L, 3)) {
 			luaL_error(L, "%f must be a 32bit integer ", lua_tonumber(L, 3));
 		}
-		int32_t i = lua_tointeger(L,3);
+		int32_t i = (int32_t)lua_tointeger(L,3);
 		write_int32(&b, i);
 		break;
 	}
@@ -887,7 +891,7 @@ lreplace(lua_State *L) {
 		if (!lua_isinteger(L, 3)) {
 			luaL_error(L, "%f must be a 64bit integer ", lua_tonumber(L, 3));
 		}
-		int64_t i = lua_tointeger(L,3);
+		int64_t i = (int64_t)lua_tointeger(L,3);
 		write_int64(&b, i);
 		break;
 	}
@@ -1015,7 +1019,7 @@ lencode_order(lua_State *L) {
 
 static int
 ldate(lua_State *L) {
-	int d = luaL_checkinteger(L,1);
+	int d = (int)luaL_checkinteger(L,1);
 	luaL_Buffer b;
 	luaL_buffinit(L, &b);
 	luaL_addchar(&b, 0);
@@ -1028,7 +1032,7 @@ ldate(lua_State *L) {
 
 static int
 ltimestamp(lua_State *L) {
-	int d = luaL_checkinteger(L,1);
+	int d = (int)luaL_checkinteger(L,1);
 	luaL_Buffer b;
 	luaL_buffinit(L, &b);
 	luaL_addchar(&b, 0);
@@ -1246,7 +1250,7 @@ init_oid_header() {
 	oid_header[3] = pid & 0xff;
 	oid_header[4] = (pid >> 8) & 0xff;
 
-	oid_counter = h ^ time(NULL) ^ (uintptr_t)&h;
+	oid_counter = (uint32_t)(h ^ time(NULL) ^ (uintptr_t)&h);
 }
 
 static inline int
